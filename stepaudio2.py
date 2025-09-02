@@ -3,12 +3,33 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from utils import compute_token_num, load_audio, log_mel_spectrogram, padding_mels
 
+# 设备检测函数
+def get_device():
+    # 为了避免内存问题，在Mac上强制使用CPU
+    return torch.device('cpu')
+    # if torch.cuda.is_available():
+    #     return torch.device('cuda')
+    # elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    #     return torch.device('mps')
+    # else:
+    #     return torch.device('cpu')
+
 
 class StepAudio2Base:
 
     def __init__(self, model_path: str):
+        self.device = get_device()
+        print(f"Using device: {self.device}")
         self.llm_tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True, padding_side="right")
-        self.llm = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16).cuda()
+        # 使用更节省内存的配置
+        dtype = torch.float16 if self.device.type != 'cpu' else torch.float32
+        self.llm = AutoModelForCausalLM.from_pretrained(
+            model_path, 
+            trust_remote_code=True, 
+            torch_dtype=dtype,
+            low_cpu_mem_usage=True,  # 启用低内存使用模式
+            device_map="auto" if self.device.type == 'cpu' else None
+        ).to(self.device)
         self.eos_token_id = self.llm_tokenizer.eos_token_id
 
     def __call__(self, messages: list, **kwargs):
@@ -23,7 +44,7 @@ class StepAudio2Base:
                 prompt_ids.append(torch.tensor([msg], dtype=torch.int32))
             else:
                 raise ValueError(f"Unsupported content type: {type(msg)}")
-        prompt_ids = torch.cat(prompt_ids, dim=-1).cuda()
+        prompt_ids = torch.cat(prompt_ids, dim=-1).to(self.device)
         attention_mask = torch.ones_like(prompt_ids)
 
         #mels = None if len(mels) == 0 else torch.stack(mels).cuda()
@@ -33,8 +54,8 @@ class StepAudio2Base:
             mel_lengths = None
         else:
             mels, mel_lengths = padding_mels(mels)
-            mels = mels.cuda()
-            mel_lengths = mel_lengths.cuda()
+            mels = mels.to(self.device)
+            mel_lengths = mel_lengths.to(self.device)
 
         generate_inputs = {
             "input_ids": prompt_ids,

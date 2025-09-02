@@ -10,13 +10,26 @@ from flashcosyvoice.modules.hifigan import HiFTGenerator
 from flashcosyvoice.utils.audio import mel_spectrogram
 from hyperpyyaml import load_hyperpyyaml
 
+# 设备检测函数
+def get_device():
+    # 为了避免内存问题，在Mac上强制使用CPU
+    return torch.device('cpu')
+    # if torch.cuda.is_available():
+    #     return torch.device('cuda')
+    # elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+    #     return torch.device('mps')
+    # else:
+    #     return torch.device('cpu')
+
 
 class Token2wav():
 
     def __init__(self, model_path, float16=False):
+        self.device = get_device()
+        print(f"Token2wav using device: {self.device}")
         self.float16 = float16
 
-        self.audio_tokenizer = s3tokenizer.load_model(f"{model_path}/speech_tokenizer_v2_25hz.onnx").cuda().eval()
+        self.audio_tokenizer = s3tokenizer.load_model(f"{model_path}/speech_tokenizer_v2_25hz.onnx").to(self.device).eval()
 
         option = onnxruntime.SessionOptions()
         option.graph_optimization_level = onnxruntime.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -29,37 +42,38 @@ class Token2wav():
         if float16:
             self.flow.half()
         self.flow.load_state_dict(torch.load(f"{model_path}/flow.pt", map_location="cpu", weights_only=True), strict=True)
-        self.flow.cuda().eval()
+        self.flow.to(self.device).eval()
 
         self.hift = HiFTGenerator()
         hift_state_dict = {k.replace('generator.', ''): v for k, v in torch.load(f"{model_path}/hift.pt", map_location="cpu", weights_only=True).items()}
         self.hift.load_state_dict(hift_state_dict, strict=True)
-        self.hift.cuda().eval()
+        self.hift.to(self.device).eval()
 
     def __call__(self, generated_speech_tokens, prompt_wav):
         audio = s3tokenizer.load_audio(prompt_wav, sr=16000)  # [T]
         mels = s3tokenizer.log_mel_spectrogram(audio)
         mels, mels_lens = s3tokenizer.padding([mels])
-        prompt_speech_tokens, prompt_speech_tokens_lens = self.audio_tokenizer.quantize(mels.cuda(), mels_lens.cuda())
+        prompt_speech_tokens, prompt_speech_tokens_lens = self.audio_tokenizer.quantize(mels.to(self.device), mels_lens.to(self.device))
 
         spk_feat = kaldi.fbank(audio.unsqueeze(0), num_mel_bins=80, dither=0, sample_frequency=16000)
         spk_feat = spk_feat - spk_feat.mean(dim=0, keepdim=True)
         spk_emb = torch.tensor(self.spk_model.run(
             None, {self.spk_model.get_inputs()[0].name: spk_feat.unsqueeze(dim=0).cpu().numpy()}
-        )[0], device='cuda')
+        )[0], device=self.device)
 
         audio, sample_rate = torchaudio.load(prompt_wav, backend='soundfile')
         audio = audio.mean(dim=0, keepdim=True)  # [1, T]
         if sample_rate != 24000:
             audio = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=24000)(audio)
         prompt_mel = mel_spectrogram(audio).transpose(1, 2).squeeze(0)  # [T, num_mels]
-        prompt_mels = prompt_mel.unsqueeze(0).cuda()
-        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device='cuda')
+        prompt_mels = prompt_mel.unsqueeze(0).to(self.device)
+        prompt_mels_lens = torch.tensor([prompt_mels.shape[1]], dtype=torch.int32, device=self.device)
 
-        generated_speech_tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device='cuda')
-        generated_speech_tokens_lens = torch.tensor([generated_speech_tokens.shape[1]], dtype=torch.int32, device='cuda')
+        generated_speech_tokens = torch.tensor([generated_speech_tokens], dtype=torch.int32, device=self.device)
+        generated_speech_tokens_lens = torch.tensor([generated_speech_tokens.shape[1]], dtype=torch.int32, device=self.device)
 
-        with torch.amp.autocast("cuda", dtype=torch.float16 if self.float16 else torch.float32):
+        device_type = self.device.type
+        with torch.amp.autocast(device_type, dtype=torch.float16 if self.float16 else torch.float32):
             mel = self.flow.inference(generated_speech_tokens, generated_speech_tokens_lens,
                 prompt_speech_tokens, prompt_speech_tokens_lens,
                 prompt_mels, prompt_mels_lens, spk_emb, 10)

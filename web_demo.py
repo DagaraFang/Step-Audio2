@@ -54,8 +54,7 @@ def _launch_demo(args, audio_model, token2wav):
             )
         chatbot = gr.Chatbot(
             elem_id="chatbot",
-            #avatar_images=["assets/user.png", "assets/assistant.png"],
-            min_height=800,
+            height=800,
             type="messages",
         )
         history = gr.State([{"role": "system", "content": system_prompt.value}])
@@ -111,7 +110,9 @@ def _launch_demo(args, audio_model, token2wav):
 
     demo.queue().launch(
         server_port=args.server_port,
-        server_name=args.server_name,
+        server_name="127.0.0.1",
+        share=False,  # 不使用share避免额外内存消耗
+        inbrowser=False,  # 不自动打开浏览器
     )
 
 
